@@ -176,7 +176,9 @@ stored: `x_ip_f1`, `x_ip_l1`, `mps_cum36_l1`, `ffr_cum36_l1`, `fg_cum36_l1`,
 | `eff_rate_10yr` | Effective rate with 10yr trailing equity return |
 | `eff_rate_exp3` | Effective rate with exponential-decay return (half-life 3yr) |
 | `eff_rate_exp2` | Effective rate with exponential-decay return (half-life 2yr) |
-| `eff_rate_rec` | Effective rate with recency-weighted return (2× recent) |
+| `x_fwd_spf` | SPF-based forward output gap forecast: one-quarter-ahead real GDP forecast (Philadelphia Fed SPF) converted to implied output gap change; used as $\mathbb{E}_t^F[x_{t+1}]$ in the $\beta_f$ term of the NK simulation |
+| `g_spf` | SPF annualised quarterly GDP growth forecast (%) |
+| `excess_monthly` | Monthly excess growth: $(g^{SPF}_t - g^{potential})/3$, used to construct `x_fwd_spf` |
 
 #### SCF aggregation validation (Section 2.6, sparse — non-NaN only at survey-year Decembers)
 
@@ -225,9 +227,9 @@ CANDH_{t-1} demand control):
 | β_f (forward IS) | 0.271 | Table 2, Combined / CorePCE / Eff Rate |
 | β_b (backward IS) | 0.687 | Table 2, Combined / CorePCE / Eff Rate |
 | σ (IS rate elasticity) | 0.108 | Table 2, Combined / CorePCE / Eff Rate |
-| γ_f (forward PC) | 0.18 | Supply-augmented Phillips curve |
-| γ_b (backward PC) | 0.19 | Supply-augmented Phillips curve |
-| κ (output gap slope) | 0.045 | Supply-augmented Phillips curve |
+| κ (Phillips curve slope) | 0.041 | Estimated directly from data (OLS full sample) |
+| γ_b (backward PC) | 0.19 | Backward-looking Phillips curve term |
+| PC constant | 1.62 | Calibrated to 2% long-run target: 2.0×(1−γ_b) |
 | λ_oil | 0.005 | Supply-augmented Phillips curve |
 | λ_GSCPI | 0.367 | Supply-augmented Phillips curve |
 | r* | 0.5% | Holston–Laubach–Williams (2017) |
@@ -317,3 +319,5 @@ If you use this replication package, please cite:
 
 > Dixon, A. (2026). *The Effective Rate: Household Portfolio Returns and
 > Monetary Policy Transmission*. Working paper.
+
+

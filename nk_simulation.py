@@ -1,21 +1,31 @@
 """
-NK Three-Equation Simulation: Missing Inflation Resolution
-============================================================
+NK Three-Equation Simulation: IS Curve Model-Implied Divergences
+=================================================================
 Companion to the Effective Rate v2 model (Dixon 2026).
 
 Simulates the standard 3-equation NK system under two rate measures:
   1. Federal funds rate (standard model)
   2. Effective rate R-bar = (1-alpha)FF + alpha*r^E (two-asset model)
 
-Uses the SUPPLY-AUGMENTED Phillips curve (oil + GSCPI) matching the paper's
-Section 5.1 / Equation (14).
+Key specification (paper Section 5):
+  - beta_f term uses SPF one-quarter-ahead GDP forecast (predictive households)
+  - beta_b term uses x[t-1] (extrapolative households, unified belief formation)
+  - Phillips curve: backward-looking only, kappa=0.041 (data-estimated)
+  - PC constant calibrated to 2% long-run target (1.62 = 2.0*(1-0.19))
+
+The simulation isolates model-implied IS curve divergences without comparing
+to actual inflation outcomes. Key findings:
+  - 47 of 132 ZLB months: FF and Eff give opposite directional stance signals
+  - 6.14 pp-years: cumulative output gap differential (2009-2019)
+  - 2.24pp: counterfactual FF premium to match Eff IS curve output path
 
 USAGE:
   python nk_simulation.py
   python nk_simulation.py --data path/to/panel_data.csv
 
 Requires: panel_data.csv with columns: date, fed_funds, eff_rate, alpha,
-  r_equity, pi_cpce, x_ip, d12_oil, gscpi, stance_ff, stance_eff
+  r_equity, pi_cpce, x_ip, d12_oil, gscpi, x_fwd_spf
+  (x_fwd_spf: SPF-based forward output gap forecast, from updated panel)
 """
 
 import pandas as pd
@@ -32,13 +42,15 @@ BETA_F = 0.271
 BETA_B = 0.687
 SIGMA  = 0.108
 
-# Supply-augmented Phillips curve (paper below Eq. 14)
-GAMMA_F   = 0.18
+# Supply-augmented Phillips curve — backward-looking only (paper Section 5)
+# GAMMA_B only: forward-looking inflation content enters through the rate variable
+# KAPPA = 0.041: estimated directly from data (OLS full sample)
+# PC_CONST = 1.62: calibrated to 2% LR target (2.0 * (1 - GAMMA_B))
 GAMMA_B   = 0.19
-KAPPA     = 0.045
+KAPPA     = 0.041
 LAM_OIL   = 0.005
 LAM_GSCPI = 0.367
-PC_CONST  = 1.23
+PC_CONST  = 1.62  # 2.0*(1-GAMMA_B): targets 2% long-run inflation
 
 # Natural rate (Holston-Laubach-Williams)
 R_STAR = 0.5
@@ -69,17 +81,21 @@ PERIODS_COARSE = {
 # ================================================================
 
 def simulate_adaptive(rate_path, x_init, pi_init, oil_path, gscpi_path,
-                       params=None):
+                       x_fwd_path=None, params=None):
     """
-    Dynamic forward simulation with adaptive (purely backward-looking) expectations.
+    Dynamic forward simulation with SPF-based forward expectations for beta_f term.
 
-    Expectation rule: E_{t}[x_{t+1}] = x_{t-1}.
-    This collapses the forward and backward terms so the combined persistence
-    coefficient is (beta_f + beta_b), making the simulation recursively tractable.
+    Expectation rule:
+      - beta_f term uses x_fwd_path[t] (SPF-based output gap forecast) when available
+      - beta_b term uses x[t-1] (last realised output gap, extrapolative)
+      - Falls back to x[t-1] for both when SPF not available
 
-    Uses the supply-augmented Phillips curve:
-      pi_t = gamma_f*pi_{t-1} + gamma_b*pi_{t-1} + kappa*x_t
-             + lam_oil*oil_t + lam_gscpi*gscpi_t + const
+    This separates the two epistemic types per the unified belief formation framework:
+    predictive households (beta_f) use the SPF forecast; extrapolative households
+    (beta_b) anchor to recent experience. See paper Section 2.3 and 2.7a.
+
+    Phillips curve uses gamma_b only (backward-looking) with constant calibrated
+    to 2% long-run target. KAPPA = 0.041 estimated directly from data.
 
     Parameters
     ----------
@@ -88,6 +104,7 @@ def simulate_adaptive(rate_path, x_init, pi_init, oil_path, gscpi_path,
     pi_init    : float, initial inflation
     oil_path   : array, 12-month log change in WTI crude
     gscpi_path : array, NY Fed GSCPI (0 where missing)
+    x_fwd_path : array or None, SPF-based forward output gap forecast
     params     : dict, override defaults
 
     Returns
@@ -95,7 +112,7 @@ def simulate_adaptive(rate_path, x_init, pi_init, oil_path, gscpi_path,
     x, pi : np.ndarray
     """
     p = dict(beta_f=BETA_F, beta_b=BETA_B, sigma=SIGMA,
-             gamma_f=GAMMA_F, gamma_b=GAMMA_B, kappa=KAPPA,
+             gamma_b=GAMMA_B, kappa=KAPPA,
              lam_oil=LAM_OIL, lam_gscpi=LAM_GSCPI,
              pc_const=PC_CONST, r_star=R_STAR)
     if params:
@@ -106,16 +123,19 @@ def simulate_adaptive(rate_path, x_init, pi_init, oil_path, gscpi_path,
     x[0], pi[0] = x_init, pi_init
 
     for t in range(1, T):
-        # IS curve: adaptive expectations E_{t}[x_{t+1}] = x_{t-1}
-        # (purely backward-looking special case; both beta_f and beta_b act on x_{t-1})
+        # IS curve: beta_f uses SPF forecast (predictive), beta_b uses x[t-1] (extrapolative)
         r_real = rate_path[t] - pi[t-1] - p['r_star']
-        x[t] = (p['beta_f'] + p['beta_b']) * x[t-1] - p['sigma'] * r_real
+        if x_fwd_path is not None and not np.isnan(x_fwd_path[t]):
+            xf = x_fwd_path[t]
+        else:
+            xf = x[t-1]  # fallback for pre-1968 data
+        x[t] = p['beta_f'] * xf + p['beta_b'] * x[t-1] - p['sigma'] * r_real
         x[t] = np.clip(x[t], -20, 20)
 
-        # Supply-augmented Phillips curve
-        oil_t = oil_path[t] if not np.isnan(oil_path[t]) else 0.0
+        # Phillips curve: backward-looking only, data-estimated kappa
+        oil_t   = oil_path[t]   if not np.isnan(oil_path[t])   else 0.0
         gscpi_t = gscpi_path[t] if not np.isnan(gscpi_path[t]) else 0.0
-        pi[t] = (p['gamma_f'] * pi[t-1] + p['gamma_b'] * pi[t-1]
+        pi[t] = (p['gamma_b'] * pi[t-1]
                  + p['kappa'] * x[t]
                  + p['lam_oil'] * oil_t + p['lam_gscpi'] * gscpi_t
                  + p['pc_const'])
@@ -189,9 +209,13 @@ def run_simulation(df, sim_start='2007-01-01', sim_end='2023-06-01',
     oil = sim['d12_oil'].fillna(0).values
     gscpi = sim['gscpi'].fillna(0).values
 
+    # Load SPF forward gap if available
+    x_fwd = sim['x_fwd_spf'].values if 'x_fwd_spf' in sim.columns else None
+
     results = {}
     for label, col in [('Fed Funds','fed_funds'), ('Eff Rate','eff_rate')]:
-        x_ad, pi_ad = simulate_adaptive(sim[col].values, x0, pi0, oil, gscpi)
+        x_ad, pi_ad = simulate_adaptive(sim[col].values, x0, pi0, oil, gscpi,
+                                        x_fwd_path=x_fwd)
         results[label] = dict(x_ad=x_ad, pi_ad=pi_ad)
 
     cum_ff  = np.cumsum(results['Fed Funds']['pi_ad'] - pi_act) / 12
@@ -201,7 +225,7 @@ def run_simulation(df, sim_start='2007-01-01', sim_end='2023-06-01',
         print(f"\n{'='*80}")
         print(f"EXERCISE 3: NK Simulation, Supply-Augmented PC ({sim_start[:4]}-{sim_end[:4]}, n={len(sim)})")
         print(f"IS: bf={BETA_F}, bb={BETA_B}, sigma={SIGMA}")
-        print(f"PC: gf={GAMMA_F}, gb={GAMMA_B}, kappa={KAPPA}, "
+        print(f"PC: gb={GAMMA_B}, kappa={KAPPA}, "
               f"lam_oil={LAM_OIL}, lam_gscpi={LAM_GSCPI}, c={PC_CONST}")
         print(f"r* = {R_STAR}%. Adaptive expectations.")
         print(f"{'='*80}")
@@ -284,7 +308,7 @@ def sensitivity_analysis(df, sim_start='2009-01-01', sim_end='2019-12-01'):
     print("EXERCISE 4: Sensitivity Analysis (Supply-Augmented PC)")
     print(f"{'='*80}")
     sweep('r_star', [0.0, 0.25, 0.5, 1.0, 1.5])
-    sweep('kappa',  [0.020, 0.045, 0.080, 0.100])
+    sweep('kappa',  [0.020, 0.041, 0.080, 0.100])  # 0.041 = data-estimated baseline
     sweep('sigma',  [0.050, 0.108, 0.150, 0.200])
 
 
@@ -329,6 +353,11 @@ def main(data_path=None):
     df = pd.read_csv(data_path, parse_dates=['date'])
     df = df.sort_values('date').reset_index(drop=True)
     print(f"Data: {len(df)} obs, {df['date'].min().date()} to {df['date'].max().date()}")
+    if 'x_fwd_spf' in df.columns:
+        spf_coverage = df['x_fwd_spf'].notna().sum()
+        print(f"SPF forward gap: {spf_coverage} months available")
+    else:
+        print("Warning: x_fwd_spf column not found. Run with updated panel_data.csv.")
 
     stance_diagnostic(df)
     gap_decomposition(df)
